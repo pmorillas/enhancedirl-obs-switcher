@@ -20,16 +20,18 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * The agent: links this OBS to an EnhancedIRL account and keeps one outgoing
  * WebSocket to the backend. Protocol: docs/PROTOCOL.md.
  *
- * What it can do is deliberately narrow: report the stream state and obey five
- * commands about the main stream (prepare, cut, start, commit, rollback). There
- * is no command to change the server, the key or any other OBS setting, and the
- * stream key never leaves OBS: only an HMAC fingerprint of it.
+ * What it can do is deliberately narrow: report the stream state, obey five
+ * commands about the main stream (prepare, cut, start, commit, rollback) and
+ * show a notice when the stream moved to another OBS. There is no command to
+ * change the server, the key or any other OBS setting, and the stream key never
+ * leaves OBS: only an HMAC fingerprint of it.
  */
 
 #include "agent.hpp"
 #include "obs-bridge.hpp"
 #include "../managed.h"
 #include "../rtmp-output/eirl-rtmp.h"
+#include "../ui/switcher-dialog.hpp"
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -72,9 +74,13 @@ namespace {
 
 constexpr int PROTOCOL = 1;
 constexpr const char *DEFAULT_API = "https://api.enhancedirl.com";
+constexpr const char *DEFAULT_PANEL = "https://app.enhancedirl.com/obs";
 constexpr const char *SUBPROTOCOL = "eirl-switcher.v1";
 constexpr auto STATUS_EVERY = std::chrono::seconds(30);
 constexpr auto LOCAL_START_TIMEOUT = std::chrono::seconds(40);
+/* After a switch's cut, how long a restart (dead-man or rollback) still counts
+ * as the same stream for streamingSince, on top of the dead-man delay. */
+constexpr auto SINCE_HOLD_MARGIN = LOCAL_START_TIMEOUT + std::chrono::seconds(20);
 
 /* Close codes after which the plugin must not retry (docs/PROTOCOL.md §2). */
 constexpr int CLOSE_REVOKED = 4401;
@@ -92,6 +98,51 @@ std::string api_base()
 	while (!base.empty() && base.back() == '/')
 		base.pop_back();
 	return base;
+}
+
+/* Milliseconds since the Unix epoch (wall clock: the backend compares it with its own). */
+long long epoch_ms()
+{
+	using namespace std::chrono;
+	return (long long)duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+/* Text from the backend that the UI shows: no control characters, at most
+ * `max_bytes` bytes and never cut in the middle of a UTF-8 character. */
+std::string clean_text(const std::string &in, size_t max_bytes)
+{
+	std::string out;
+	for (char c : in) {
+		unsigned char u = (unsigned char)c;
+		if (u >= 0x20 && u != 0x7f)
+			out += c;
+	}
+	if (out.size() > max_bytes) {
+		size_t end = max_bytes;
+		while (end > 0 && ((unsigned char)out[end] & 0xC0) == 0x80)
+			end--;
+		out.resize(end);
+	}
+	return out;
+}
+
+/* My OBS when the backend has not said where it is (not linked yet, or an older
+ * backend): the panel lives next to the API, "api.<domain>" → "app.<domain>/obs". */
+std::string panel_url_from_api(const std::string &base)
+{
+	size_t scheme_end = base.find("://");
+	if (scheme_end == std::string::npos)
+		return DEFAULT_PANEL;
+	const std::string scheme = base.substr(0, scheme_end);
+	if (scheme != "https" && scheme != "http")
+		return DEFAULT_PANEL;
+	size_t host_start = scheme_end + 3;
+	size_t host_end = base.find_first_of("/?#", host_start);
+	std::string host =
+		base.substr(host_start, host_end == std::string::npos ? std::string::npos : host_end - host_start);
+	if (host.size() <= 4 || host.rfind("api.", 0) != 0)
+		return DEFAULT_PANEL;
+	return scheme + "://app." + host.substr(4) + "/obs";
 }
 
 std::string ws_url(const std::string &base)
@@ -338,15 +389,46 @@ public:
 	{
 		if (EIRL_MANAGED_BUILD)
 			return; /* a Cloud OBS is linked by EnhancedIRL, never by hand */
-		if (pairing_active_.exchange(true))
-			return;
+		{
+			std::lock_guard<std::mutex> g(m_);
+			if (pairing_active_) {
+				/* A cancelled link may still be finishing a request: start over
+				 * as soon as it ends instead of dropping the click. */
+				if (pairing_cancel_)
+					pairing_again_ = true;
+				return;
+			}
+			pairing_active_ = true;
+			pairing_cancel_ = false;
+		}
 		if (pairing_.joinable())
 			pairing_.join();
-		pairing_cancel_ = false;
 		pairing_ = std::thread([this] {
-			pair_flow();
-			pairing_active_ = false;
+			for (;;) {
+				pair_flow();
+				std::lock_guard<std::mutex> g(m_);
+				if (!pairing_again_ || !running_ || link_.valid()) {
+					pairing_again_ = false;
+					pairing_active_ = false;
+					return;
+				}
+				pairing_again_ = false;
+				pairing_cancel_ = false;
+			}
 		});
+	}
+
+	void cancel_pairing()
+	{
+		std::lock_guard<std::mutex> g(m_);
+		if (!pairing_active_)
+			return;
+		pairing_cancel_ = true;
+		pairing_again_ = false;
+		pairing_code_.clear();
+		verify_url_.clear();
+		last_error_.clear();
+		LOG(LOG_INFO, "linking cancelled");
 	}
 
 	void unlink()
@@ -359,6 +441,8 @@ public:
 			ws = std::move(ws_);
 			link_ = Link{};
 			account_.clear();
+			agent_name_.clear();
+			panel_url_.clear();
 			connected_ = false;
 			deadman_armed_ = false;
 		}
@@ -372,11 +456,18 @@ public:
 	{
 		std::lock_guard<std::mutex> g(m_);
 		*out = {};
-		out->pairing = pairing_active_;
+		out->pairing = pairing_visible_locked();
 		out->linked = link_.valid();
 		out->connected = connected_;
-		snprintf(out->code, sizeof(out->code), "%s", pairing_code_.c_str());
+		if (out->pairing && !pairing_code_.empty()) {
+			snprintf(out->code, sizeof(out->code), "%s", pairing_code_.c_str());
+			auto left =
+				std::chrono::duration_cast<std::chrono::milliseconds>(pairing_expires_ - Clock::now());
+			out->code_seconds_left = left.count() > 0 ? (int)((left.count() + 999) / 1000) : 0;
+		}
 		snprintf(out->account, sizeof(out->account), "%s", account_.c_str());
+		snprintf(out->agent_name, sizeof(out->agent_name), "%s", agent_name_.c_str());
+		snprintf(out->panel_url, sizeof(out->panel_url), "%s", panel_url_locked().c_str());
 		snprintf(out->error, sizeof(out->error), "%s", last_error_.c_str());
 	}
 
@@ -391,15 +482,27 @@ public:
 			open_in_browser(url);
 	}
 
+	void open_panel()
+	{
+		std::string url;
+		{
+			std::lock_guard<std::mutex> g(m_);
+			url = panel_url_locked();
+		}
+		open_in_browser(url);
+	}
+
 	std::string describe()
 	{
 		std::lock_guard<std::mutex> g(m_);
-		if (pairing_active_)
-			return pairing_code_.empty() ? "Linking..." : "Linking: confirm code " + pairing_code_ + " in your browser";
+		if (pairing_visible_locked())
+			return pairing_code_.empty() ? "Linking..."
+						     : "Linking: confirm code " + pairing_code_ + " in your browser";
 		if (!link_.valid())
 			return last_error_.empty() ? "Not linked" : "Not linked (" + last_error_ + ")";
 		std::string who = account_.empty() ? "your EnhancedIRL account" : account_;
-		return "Linked to " + who + (connected_ ? " (connected)" : " (connecting...)");
+		std::string as = agent_name_.empty() ? "" : " as " + agent_name_;
+		return "Linked to " + who + as + (connected_ ? " (connected)" : " (connecting...)");
 	}
 
 	void on_streaming_started()
@@ -409,6 +512,13 @@ public:
 			std::lock_guard<std::mutex> g(m_);
 			id = pending_start_id_;
 			pending_start_id_.clear();
+			/* Same stream if OBS reports a start twice, or if this is the restart
+			 * after a switch's cut (dead-man or rollback): keep the time. */
+			bool same_stream = since_ms_ != 0 && (since_live_ || Clock::now() < since_hold_until_);
+			if (!same_stream)
+				since_ms_ = epoch_ms();
+			since_live_ = true;
+			since_hold_until_ = Clock::time_point{};
 		}
 		if (!id.empty())
 			send_result(id, true);
@@ -423,6 +533,10 @@ public:
 			std::lock_guard<std::mutex> g(m_);
 			id = pending_start_id_;
 			pending_start_id_.clear();
+			since_live_ = false;
+			/* A switch's cut keeps it for the restart that may follow. */
+			if (Clock::now() >= since_hold_until_)
+				since_ms_ = 0;
 		}
 		if (!id.empty())
 			send_result(id, false, "start_failed");
@@ -431,6 +545,17 @@ public:
 	}
 
 private:
+	/* Caller holds m_. A cancelled link that is still winding down is not shown. */
+	bool pairing_visible_locked() const { return pairing_active_ && (!pairing_cancel_ || pairing_again_); }
+
+	/* Caller holds m_. */
+	std::string panel_url_locked() const
+	{
+		if (!panel_url_.empty())
+			return panel_url_;
+		return panel_url_from_api(link_.valid() && !link_.apiBase.empty() ? link_.apiBase : api_base());
+	}
+
 	/* Caller holds m_. */
 	void connect_locked()
 	{
@@ -475,7 +600,7 @@ private:
 	void send_event(const char *name)
 	{
 		Json e;
-		e.set("type", "event").set("name", name).set("at", (long long)(os_gettime_ns() / 1000000));
+		e.set("type", "event").set("name", name).set("at", epoch_ms());
 		send(e.dump());
 	}
 
@@ -487,11 +612,24 @@ private:
 			salt = link_.salt;
 		}
 		eirl::ObsState s = eirl::read_obs_state(salt);
+		long long since = 0;
+		{
+			std::lock_guard<std::mutex> g(m_);
+			/* Already streaming when the plugin started (or a start we did not
+			 * hear about): count from now. */
+			if (s.streaming && since_ms_ == 0) {
+				since_ms_ = epoch_ms();
+				since_live_ = true;
+			}
+			since = s.streaming ? since_ms_ : 0;
+		}
 		Json st;
 		st.set("type", "status")
 			.set_bool("streaming", s.streaming)
 			.set_bool("reconnecting", s.reconnecting)
 			.set_bool("serviceReady", s.serviceReady);
+		if (since > 0)
+			st.set("streamingSince", since);
 		if (!s.platform.empty())
 			st.set("platform", s.platform);
 		if (!s.serverHost.empty())
@@ -581,6 +719,8 @@ private:
 			if (!EIRL_MANAGED_BUILD) {
 				link_ = Link{};
 				account_.clear();
+				agent_name_.clear();
+				panel_url_.clear();
 				forget_link();
 			}
 			break;
@@ -605,13 +745,30 @@ private:
 		const std::string id = m.str("id");
 
 		if (type == "welcome") {
+			/* Also sent again later (e.g. when the OBS is renamed in My OBS). */
 			std::lock_guard<std::mutex> g(m_);
-			account_ = m.str("accountName").substr(0, 128);
-			LOG(LOG_INFO, "linked to %s", account_.c_str());
+			account_ = clean_text(m.str("accountName"), 127);
+			agent_name_ = clean_text(m.str("agentName"), 127);
+			const std::string panel = m.str("panelUrl");
+			if (safe_url(panel))
+				panel_url_ = panel;
+			else if (!panel.empty())
+				LOG(LOG_WARNING, "ignoring an unexpected panel URL");
+			LOG(LOG_INFO, "linked to %s as \"%s\"", account_.c_str(), agent_name_.c_str());
+			return;
+		}
+		if (type == "handedOff") {
+			/* The stream moved from this OBS to another one from My OBS. */
+			std::string to = clean_text(m.str("toName"), 127);
+			long long at = m.num("at");
+			LOG(LOG_INFO, "the stream moved to \"%s\" (asked for from My OBS)", to.c_str());
+			/* A Cloud OBS has nobody in front of it to read a notice. */
+			if (!EIRL_MANAGED_BUILD)
+				eirl_ui_show_handoff(to.c_str(), at > 0 ? at : epoch_ms());
 			return;
 		}
 		if (id.empty() || id.size() > 64)
-			return; /* every command carries an id */
+			return; /* every command carries an id; anything else is ignored */
 
 		if (type == "prepare") {
 			eirl::ObsState s = eirl::read_obs_state("");
@@ -630,7 +787,7 @@ private:
 			}
 			/* YouTube: which of its two ingests to use (the free one, see eirl-rtmp.h). */
 			const std::string ingest = m.str("ingest");
-			eirl_rtmp_set_next_ingest(ingest == "backup"	 ? EIRL_INGEST_BACKUP
+			eirl_rtmp_set_next_ingest(ingest == "backup"    ? EIRL_INGEST_BACKUP
 						  : ingest == "primary" ? EIRL_INGEST_PRIMARY
 									: EIRL_INGEST_ASIS);
 			handle_start(id);
@@ -638,6 +795,10 @@ private:
 			{
 				std::lock_guard<std::mutex> g(m_);
 				deadman_armed_ = false;
+				/* The switch is done: this OBS will not come back on its own. */
+				since_hold_until_ = Clock::time_point{};
+				if (!since_live_)
+					since_ms_ = 0;
 			}
 			send_result(id, true);
 		}
@@ -653,17 +814,27 @@ private:
 			pending_start_id_.clear();
 		}
 		bool was_starting = !cancelled_start.empty();
+		/* Never wait longer than the platforms' shortest window allows. */
+		long long ms = dead_man_ms > 60000 ? 60000 : dead_man_ms;
+		if (ms > 0) {
+			/* Before cutting: OBS may report the stop before cut_streaming returns. */
+			std::lock_guard<std::mutex> g(m_);
+			since_hold_until_ = Clock::now() + std::chrono::milliseconds(ms) + SINCE_HOLD_MARGIN;
+		}
 		bool cut = eirl::cut_streaming();
 		if (was_starting)
 			send_result(cancelled_start, false, "start_failed", "cancelled");
 		if (!cut && !was_starting) {
-			send_result(id, false, eirl::read_obs_state("").streaming ? "not_switcher_output" : "not_streaming");
+			{
+				std::lock_guard<std::mutex> g(m_);
+				since_hold_until_ = Clock::time_point{};
+			}
+			send_result(id, false,
+				    eirl::read_obs_state("").streaming ? "not_switcher_output" : "not_streaming");
 			return;
 		}
-		if (dead_man_ms > 0) {
+		if (ms > 0) {
 			std::lock_guard<std::mutex> g(m_);
-			/* Never wait longer than the platforms' shortest window allows. */
-			long long ms = dead_man_ms > 60000 ? 60000 : dead_man_ms;
 			deadman_at_ = Clock::now() + std::chrono::milliseconds(ms);
 			deadman_armed_ = true;
 		}
@@ -706,7 +877,8 @@ private:
 					deadman_armed_ = false;
 					restart = true;
 				}
-				if (!pending_start_id_.empty() && Clock::now() - pending_start_at_ > LOCAL_START_TIMEOUT) {
+				if (!pending_start_id_.empty() &&
+				    Clock::now() - pending_start_at_ > LOCAL_START_TIMEOUT) {
 					timed_out_start = pending_start_id_;
 					pending_start_id_.clear();
 				}
@@ -735,6 +907,14 @@ private:
 
 	void pair_flow()
 	{
+		{
+			std::lock_guard<std::mutex> g(m_);
+			pairing_code_.clear();
+			verify_url_.clear();
+			last_error_.clear();
+		}
+		if (pairing_cancel_)
+			return;
 		std::string base = api_base();
 		ix::HttpClient http(false);
 		ix::SocketTLSOptions tls;
@@ -751,9 +931,10 @@ private:
 			.set("obsVersion", obs_get_version_string())
 			.set("pluginVersion", PLUGIN_VERSION);
 		auto res = http.post(base + "/obs-agent/pairing", body.dump(), args);
+		if (pairing_cancel_)
+			return; /* cancelled while asking: no code, no browser, no error */
 		if (!res || res->statusCode != 201) {
-			set_error(res && res->statusCode == 429 ? "too_many"
-								 : "network");
+			set_error(res && res->statusCode == 429 ? "too_many" : "network");
 			LOG(LOG_WARNING, "pairing request failed (%d)", res ? res->statusCode : -1);
 			return;
 		}
@@ -768,24 +949,29 @@ private:
 			set_error("unexpected");
 			return;
 		}
+		if (interval < 1 || interval > 30)
+			interval = 3;
+		auto deadline = Clock::now() + std::chrono::seconds(expires > 0 && expires < 3600 ? expires : 600);
 		{
 			std::lock_guard<std::mutex> g(m_);
-			pairing_code_ = code;
+			if (pairing_cancel_)
+				return;
+			pairing_code_ = clean_text(code, 15);
+			pairing_expires_ = deadline;
 			verify_url_ = verify_url;
 			last_error_.clear();
 		}
 		LOG(LOG_INFO, "linking: confirm code %s in your browser", code.c_str());
 		open_in_browser(verify_url);
 
-		if (interval < 1 || interval > 30)
-			interval = 3;
-		auto deadline = Clock::now() + std::chrono::seconds(expires > 0 && expires < 3600 ? expires : 600);
 		Json poll;
 		poll.set("pollSecret", poll_secret);
 		const std::string poll_body = poll.dump();
 		while (!pairing_cancel_ && Clock::now() < deadline) {
 			for (long long i = 0; i < interval * 4 && !pairing_cancel_; i++)
 				std::this_thread::sleep_for(std::chrono::milliseconds(250));
+			if (pairing_cancel_)
+				break;
 			auto r = http.post(base + "/obs-agent/pairing/" + pairing_id + "/token", poll_body, args);
 			if (!r || r->statusCode == 202 || r->statusCode == 0)
 				continue;
@@ -818,14 +1004,17 @@ private:
 		}
 		std::lock_guard<std::mutex> g(m_);
 		pairing_code_.clear();
-		if (last_error_.empty())
+		verify_url_.clear();
+		if (last_error_.empty() && !pairing_cancel_)
 			last_error_ = "expired";
 	}
 
+	/* A cancelled link ends quietly. */
 	void set_error(const std::string &e)
 	{
 		std::lock_guard<std::mutex> g(m_);
-		last_error_ = e;
+		if (!pairing_cancel_)
+			last_error_ = e;
 		pairing_code_.clear();
 	}
 
@@ -833,18 +1022,30 @@ private:
 	Link link_;
 	std::unique_ptr<ix::WebSocket> ws_;
 	bool connected_ = false;
+	/* From the latest welcome. */
 	std::string account_;
+	std::string agent_name_;
+	std::string panel_url_;
 	std::string last_error_;
 	std::string pairing_code_;
+	Clock::time_point pairing_expires_;
 	std::string verify_url_;
 	std::string pending_start_id_;
 	Clock::time_point pending_start_at_;
 	bool deadman_armed_ = false;
 	Clock::time_point deadman_at_;
+	/* streamingSince: when this OBS went on air (ms since the epoch, 0 = not
+	 * known). since_live_ is true between OBS's start and stop events; until
+	 * since_hold_until_, a stop and restart after a switch's cut (dead-man or
+	 * rollback) keeps the time. */
+	long long since_ms_ = 0;
+	bool since_live_ = false;
+	Clock::time_point since_hold_until_;
 	std::atomic<bool> force_status_{false};
 	std::atomic<bool> running_{false};
 	std::atomic<bool> pairing_active_{false};
 	std::atomic<bool> pairing_cancel_{false};
+	bool pairing_again_ = false; /* guarded by m_ */
 	std::thread ticker_;
 	std::thread pairing_;
 };
@@ -878,6 +1079,12 @@ void eirl_agent_begin_pairing(void)
 		g_agent->begin_pairing();
 }
 
+void eirl_agent_cancel_pairing(void)
+{
+	if (g_agent)
+		g_agent->cancel_pairing();
+}
+
 void eirl_agent_unlink(void)
 {
 	if (g_agent)
@@ -896,6 +1103,12 @@ void eirl_agent_reopen_browser(void)
 {
 	if (g_agent)
 		g_agent->reopen_browser();
+}
+
+void eirl_agent_open_panel(void)
+{
+	if (g_agent)
+		g_agent->open_panel();
 }
 
 char *eirl_agent_describe(void)

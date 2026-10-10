@@ -30,3 +30,9 @@ void eirl_ui_show_dialog(void)
 	obs_log(LOG_INFO, "status: %s", text);
 	bfree(text);
 }
+
+void eirl_ui_show_handoff(const char *to_name, long long at_ms)
+{
+	UNUSED_PARAMETER(at_ms);
+	obs_log(LOG_INFO, "the stream moved to \"%s\" (asked for from My OBS)", to_name ? to_name : "");
+}

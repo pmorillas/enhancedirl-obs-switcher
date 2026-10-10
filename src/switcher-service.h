@@ -29,6 +29,10 @@ extern struct obs_service_info eirl_switcher_service_info;
  * if the service is not ours. */
 const char *switcher_service_platform(obs_service_t *service);
 
+/* The platform's name as people know it ("Twitch", "YouTube - RTMPS"...), or NULL
+ * for a custom server of an unknown platform and for services that are not ours. */
+const char *switcher_service_display_name(obs_service_t *service);
+
 /* Settings of another service rewritten for the switcher's service: OBS's own
  * platform list ("rtmp_common") as it is, anything else as a custom server.
  * `platform_hint` (may be NULL) names the platform behind a custom server.

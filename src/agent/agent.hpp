@@ -35,6 +35,8 @@ void eirl_agent_stop(void);
 /* Starts linking this OBS: asks for a code and opens the confirmation page in
  * the browser. Does nothing if a link is already in progress. */
 void eirl_agent_begin_pairing(void);
+/* Stops the link in progress (the code is dropped; nothing is linked). */
+void eirl_agent_cancel_pairing(void);
 /* Forgets the saved link and disconnects. */
 void eirl_agent_unlink(void);
 
@@ -44,11 +46,14 @@ char *eirl_agent_describe(void);
 
 /* Structured state for the UI (which translates it). */
 struct eirl_agent_state {
-	bool pairing;      /* a link is in progress */
-	bool linked;       /* this OBS has a saved link */
-	bool connected;    /* the connection with EnhancedIRL is up */
-	char code[16];     /* pairing code while linking ("ABCD-EFGH") */
-	char account[128]; /* account it is linked to, once known */
+	bool pairing;          /* a link is in progress */
+	bool linked;           /* this OBS has a saved link */
+	bool connected;        /* the connection with EnhancedIRL is up */
+	char code[16];         /* pairing code while linking ("ABCD-EFGH") */
+	int code_seconds_left; /* while a code is shown: seconds until it expires */
+	char account[128];     /* account it is linked to, once known */
+	char agent_name[128];  /* name of this OBS in My OBS, once known */
+	char panel_url[512];   /* My OBS page (from the backend, or derived from the API) */
 	/* Last problem, as a stable key: "", "revoked", "not_allowed", "replaced",
 	 * "upgrade", "limit_reached", "email_not_verified", "expired", "network",
 	 * "too_many", "unexpected". */
@@ -58,6 +63,8 @@ void eirl_agent_get_state(struct eirl_agent_state *out);
 
 /* Opens the confirmation page again while linking. */
 void eirl_agent_reopen_browser(void);
+/* Opens My OBS in the browser. */
+void eirl_agent_open_panel(void);
 
 /* Frontend events the agent needs (streaming started/stopped). */
 void eirl_agent_on_streaming_started(void);

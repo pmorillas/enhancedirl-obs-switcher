@@ -11,9 +11,12 @@ Design rules that the protocol enforces:
    for different channels.
 2. **The backend has no command to change the server, the key or any other OBS setting.**
    The only commands are `prepare`, `cut`, `start`, `commit` and `rollback`, all about the
-   main stream output.
+   main stream output. The other messages it can send (`welcome`, `handedOff`) only change
+   what the plugin shows.
 3. **The plugin trusts nothing it receives.** Unknown messages are ignored, every field is
    validated, and a command that does not make sense in the current state is rejected.
+   Text shown in OBS (account, names) is shown as plain text, and URLs opened in the browser
+   must be `https` and plain.
 4. **A lost backend never leaves you off the air.** After a `cut`, the plugin arms a
    dead-man timer: if no `commit` arrives in time, it starts streaming again on its own.
 
@@ -62,6 +65,11 @@ Response `201`:
 
 `POST /obs-agent/pairing` can also answer `429 { "error": "too_many_pending" }` (too many pending
 links from the same network) or `503 { "error": "disabled" \| "busy" }`.
+
+While it waits, the plugin shows the code with a countdown taken from `expiresIn`. Cancelling
+in the plugin just stops polling: nothing is sent, and the pending link expires on its own.
+If the confirmation arrives at the same moment as the cancel, the link is kept (the user did
+confirm it in the browser).
 
 Before confirming, the panel shows **which device is asking** (the name and OS the plugin sent,
 and how long ago). Nobody should confirm a code they did not start on their own OBS: whoever
@@ -114,6 +122,7 @@ disabled), `1008` (too many frames).
 {
   "type": "status",
   "streaming": true,
+  "streamingSince": 1791587032151,
   "reconnecting": false,
   "serviceReady": true,
   "platform": "twitch",
@@ -125,6 +134,12 @@ disabled), `1008` (too many frames).
 }
 ```
 
+- `streamingSince`: when this OBS went on air, in milliseconds since the Unix epoch (wall
+  clock). Only present while `streaming` is `true`. The plugin takes it from OBS's "streaming
+  started" event (or, if OBS was already streaming when the plugin started, from the moment it
+  noticed) and drops it when the stream stops. It does **not** start again when OBS reconnects
+  on its own (`reconnecting`), nor when this OBS goes back on air after a switch's `cut` —
+  the dead-man restart or a `rollback` — because the platform's broadcast never ended.
 - `serviceReady`: the stream service is the EnhancedIRL Switcher service and has a server and
   a key. Without it the OBS can be shown but cannot take part in a switch.
 - `serverHost`: host only, never the path (some custom URLs carry secrets in the path).
@@ -135,16 +150,36 @@ disabled), `1008` (too many frames).
 
 ### 2.2 Backend → plugin (no answer expected)
 
-`welcome` — right after `hello`. The plugin shows it in OBS, so the user can see which account
-this OBS is linked to.
+`welcome` — right after `hello`, and again whenever something in it changes (for example when
+the OBS is renamed in My OBS). The plugin accepts any number of them and keeps the latest
+values. It shows them in OBS, so the user can see which account this OBS is linked to and the
+name it has in My OBS.
 
 ```json
-{ "type": "welcome", "accountName": "p***@example.com", "agentName": "Streaming PC" }
+{ "type": "welcome", "accountName": "p***@example.com", "agentName": "Streaming PC",
+  "panelUrl": "https://app.enhancedirl.com/obs" }
 ```
+
+- `panelUrl`: absolute URL of My OBS, opened by the plugin's "Open My OBS" buttons. Optional:
+  while it has not arrived (not linked yet, or an older backend), the plugin derives it from
+  the API base — a host starting with `api.` becomes the same host with `app.` and the path
+  `/obs` (`https://api.enhancedirl.com` → `https://app.enhancedirl.com/obs`); anything else
+  falls back to `https://app.enhancedirl.com/obs`. A `welcome` without it keeps the previous one.
+
+`handedOff` — a switch asked for from My OBS moved the stream from this OBS to another one.
+The plugin shows a notice (not modal) saying where the stream is now and when it was asked
+for; a newer notice replaces an older one. The Cloud OBS build never shows it.
+
+```json
+{ "type": "handedOff", "toName": "Cloud OBS", "at": 1791587032151 }
+```
+
+- `toName`: name of the OBS that is on air now.
+- `at`: when the switch was asked for, in milliseconds since the Unix epoch.
 
 ### 2.3 More plugin → backend messages
 
-`event` — something happened locally.
+`event` — something happened locally. `at` is in milliseconds since the Unix epoch.
 
 ```json
 { "type": "event", "name": "streaming_started", "at": 1791587032151 }
@@ -188,3 +223,8 @@ itself disappears after the `cut`, A's dead-man timer restarts A's stream.
 `protocol` in `hello` is an integer. The backend accepts the current version and the previous
 one; older plugins get close code `4426`. New optional fields can appear in any message at
 any time: both sides must ignore fields they do not know.
+
+New message types can appear too. The plugin ignores a message whose `type` it does not know
+and keeps the connection open, without answering it: a newer backend can add notices (as it
+did with `handedOff`) without breaking older plugins. A command the plugin does not know gets
+no `result`, so the backend times it out as it would with a lost answer.

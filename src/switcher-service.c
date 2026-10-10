@@ -48,6 +48,7 @@ struct switcher_service {
 	char *custom_server;
 	char *custom_key;
 	char *platform;
+	char *display; /* platform name for people; NULL for an unknown custom server */
 };
 
 static const char *switcher_service_name(void *unused)
@@ -113,6 +114,23 @@ static const char *platform_from_server(const char *url)
 	return NULL;
 }
 
+/* Slug → the platform's own name, for the UI. NULL when there is no better name. */
+static const char *platform_display(const char *slug)
+{
+	static const struct {
+		const char *slug;
+		const char *name;
+	} names[] = {
+		{"twitch", "Twitch"}, {"kick", "Kick"},   {"youtube", "YouTube"}, {"facebook", "Facebook"},
+		{"tiktok", "TikTok"}, {"trovo", "Trovo"}, {"rumble", "Rumble"},   {"x", "X"},
+	};
+	for (size_t i = 0; slug && i < sizeof(names) / sizeof(names[0]); i++) {
+		if (strcmp(slug, names[i].slug) == 0)
+			return names[i].name;
+	}
+	return NULL;
+}
+
 static void switcher_service_update(void *data, obs_data_t *settings)
 {
 	struct switcher_service *s = data;
@@ -121,6 +139,7 @@ static void switcher_service_update(void *data, obs_data_t *settings)
 	bfree(s->custom_server);
 	bfree(s->custom_key);
 	bfree(s->platform);
+	bfree(s->display);
 	s->custom_server = bstrdup(obs_data_get_string(settings, S_CUSTOM_SERVER));
 	s->custom_key = bstrdup(obs_data_get_string(settings, S_CUSTOM_KEY));
 	if (s->custom) {
@@ -130,8 +149,12 @@ static void switcher_service_update(void *data, obs_data_t *settings)
 		if (!slug || strcmp(slug, "other") == 0)
 			slug = platform_from_server(s->custom_server);
 		s->platform = bstrdup(slug ? slug : "custom");
+		const char *display = platform_display(s->platform);
+		s->display = display ? bstrdup(display) : NULL;
 	} else {
-		s->platform = bstrdup(platform_slug(obs_data_get_string(settings, "service")));
+		const char *name = obs_data_get_string(settings, "service");
+		s->platform = bstrdup(platform_slug(name));
+		s->display = name && *name ? bstrdup(name) : NULL;
 	}
 
 	if (s->inner)
@@ -146,6 +169,7 @@ static void switcher_service_destroy(void *data)
 	bfree(s->custom_server);
 	bfree(s->custom_key);
 	bfree(s->platform);
+	bfree(s->display);
 	bfree(s);
 }
 
@@ -315,6 +339,14 @@ const char *switcher_service_platform(obs_service_t *service)
 		return NULL;
 	struct switcher_service *s = obs_obj_get_data(service);
 	return s ? s->platform : NULL;
+}
+
+const char *switcher_service_display_name(obs_service_t *service)
+{
+	if (!switcher_service_platform(service))
+		return NULL;
+	struct switcher_service *s = obs_obj_get_data(service);
+	return s ? s->display : NULL;
 }
 
 obs_data_t *switcher_service_settings_from(obs_service_t *current, const char *platform_hint)

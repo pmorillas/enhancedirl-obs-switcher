@@ -25,6 +25,11 @@ extern "C" {
 /* Shows the EnhancedIRL Switcher window (Tools menu). Call on the UI thread. */
 void eirl_ui_show_dialog(void);
 
+/* Tells the user that the stream moved from this OBS to `to_name` (a switch
+ * asked for from My OBS at `at_ms`, milliseconds since the epoch). A newer
+ * notice replaces an older one. Callable from any thread. */
+void eirl_ui_show_handoff(const char *to_name, long long at_ms);
+
 #ifdef __cplusplus
 }
 #endif
