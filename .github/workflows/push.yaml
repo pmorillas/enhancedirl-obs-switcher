@@ -88,6 +88,33 @@ jobs:
             done
           done
 
+      - name: Add Stable Download Names 🔗
+        if: fromJSON(steps.check.outputs.validTag)
+        run: |
+          : Add Stable Download Names 🔗
+          if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
+          shopt -s nullglob
+
+          # Copies without the version, so that
+          # https://github.com/<owner>/<repo>/releases/latest/download/<name> always
+          # points at the newest release.
+          name='enhancedirl-obs-switcher'
+          variants=(
+            'windows-x64.zip'
+            'macos-universal.tar.xz'
+            'x86_64-linux-gnu.tar.xz'
+          )
+
+          for variant in "${variants[@]}"; do
+            candidates=("${name}"-[0-9]*-"${variant}")
+            if (( ${#candidates[@]} != 1 )); then
+              echo "::error::Expected one ${name}-<version>-${variant}, found ${#candidates[@]}: ${candidates[*]}"
+              exit 1
+            fi
+            cp "${candidates[0]}" "${name}-${variant}"
+            echo "${candidates[0]} -> ${name}-${variant}"
+          done
+
       - name: Generate Checksums 🪪
         if: fromJSON(steps.check.outputs.validTag)
         run: |
