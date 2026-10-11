@@ -36,6 +36,11 @@ void eirl_ui_show_dialog(void)
 	bfree(text);
 }
 
+bool eirl_ui_has_window(void)
+{
+	return false;
+}
+
 void eirl_ui_show_handoff(const char *to_name, long long at_ms)
 {
 	UNUSED_PARAMETER(at_ms);

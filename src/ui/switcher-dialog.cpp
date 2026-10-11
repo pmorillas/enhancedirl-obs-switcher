@@ -19,8 +19,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 /*
  * The plugin's windows. The main one is a three-step checklist that always shows
  * what is missing: link this OBS, use the switcher's stream service, and be ready
- * to move the stream. The other one tells the user that the stream moved to
- * another OBS. Everything else lives in the web panel (My OBS).
+ * to move the stream. Below it, once linked, the remote control switch (off by
+ * default). The other window tells the user that the stream moved to another
+ * OBS. Everything else lives in the web panel (My OBS).
  */
 
 #include "switcher-dialog.hpp"
@@ -28,6 +29,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 
+#include <QCheckBox>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
@@ -381,6 +383,8 @@ public:
 		build_step2();
 		build_step3();
 
+		build_control(layout);
+
 		layout->addStretch();
 
 		/* Footer: help and version on the left; when ready, the way to My OBS. */
@@ -494,6 +498,36 @@ private:
 		step3_.body->addWidget(s3text_);
 	}
 
+	/* Remote control: off by default, one switch per OBS, saved with the link. */
+	void build_control(QVBoxLayout *layout)
+	{
+		control_ = new QFrame(this);
+		auto *box = new QVBoxLayout(control_);
+		box->setContentsMargins(0, 0, 0, 0);
+		box->setSpacing(6);
+		box->addWidget(separator());
+		auto *row = new QHBoxLayout();
+		row->setContentsMargins(0, 8, 0, 0);
+		row->setSpacing(10);
+		controlBox_ = new QCheckBox(T("Control.Allow"), control_);
+		controlBox_->setCursor(Qt::PointingHandCursor);
+		/* clicked, not toggled: only the user's clicks change the setting. */
+		connect(controlBox_, &QCheckBox::clicked, [](bool on) { eirl_agent_set_control_enabled(on); });
+		controlActive_ = new QLabel(control_);
+		controlActive_->setTextFormat(Qt::PlainText);
+		controlActive_->setText(QStringLiteral("● ") + T("Control.Active"));
+		controlActive_->setStyleSheet(
+			QStringLiteral("QLabel { background-color: rgba(70, 95, 255, 0.20); color: #8C9BFF;"
+				       " border-radius: 9px; padding: 2px 10px; font-weight: bold; }"));
+		row->addWidget(controlBox_);
+		row->addStretch();
+		row->addWidget(controlActive_);
+		controlText_ = text_label(control_, "text-muted");
+		box->addLayout(row);
+		box->addWidget(controlText_);
+		layout->addWidget(control_);
+	}
+
 	void refresh()
 	{
 		eirl_agent_state s;
@@ -578,6 +612,14 @@ private:
 			s3text_->setText(T("Step3.Connecting"));
 		}
 		s3text_->setVisible(done3 || connecting);
+
+		/* Remote control: once linked, never in a Cloud OBS. */
+		control_->setVisible(!managed && s.linked);
+		controlBox_->setEnabled(s.control_supported);
+		if (controlBox_->isChecked() != s.control_enabled)
+			controlBox_->setChecked(s.control_enabled);
+		controlText_->setText(T(s.control_supported ? "Control.Text" : "Control.Unavailable"));
+		controlActive_->setVisible(s.control_enabled && s.control_active);
 
 		/* Footer */
 		how_->setVisible(!managed);
@@ -691,6 +733,10 @@ private:
 	QLabel *s2text_;
 	QPushButton *useService_;
 	QLabel *s3text_;
+	QFrame *control_;
+	QCheckBox *controlBox_;
+	QLabel *controlText_;
+	QLabel *controlActive_;
 	QLabel *how_;
 	QPushButton *close_;
 	QPushButton *openPanel_;
@@ -776,6 +822,11 @@ extern "C" void eirl_ui_show_dialog(void)
 	g_dialog->show();
 	g_dialog->raise();
 	g_dialog->activateWindow();
+}
+
+extern "C" bool eirl_ui_has_window(void)
+{
+	return true;
 }
 
 extern "C" void eirl_ui_show_handoff(const char *to_name, long long at_ms)

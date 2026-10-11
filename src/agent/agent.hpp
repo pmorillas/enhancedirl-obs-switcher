@@ -64,6 +64,11 @@ struct eirl_agent_state {
 	 * "upgrade", "limit_reached", "email_not_verified", "expired", "network",
 	 * "too_many", "unexpected". */
 	char error[32];
+	/* Remote control: this OBS supports it (not a Cloud OBS, OBS WebSocket 5.5+),
+	 * the user allowed it, and a request ran in the last few seconds. */
+	bool control_supported;
+	bool control_enabled;
+	bool control_active;
 };
 void eirl_agent_get_state(struct eirl_agent_state *out);
 
@@ -72,9 +77,14 @@ void eirl_agent_reopen_browser(void);
 /* Opens My OBS in the browser. */
 void eirl_agent_open_panel(void);
 
-/* Frontend events the agent needs (streaming started/stopped). */
+/* Frontend events the agent needs (streaming started/stopped, OBS closing). */
 void eirl_agent_on_streaming_started(void);
 void eirl_agent_on_streaming_stopped(void);
+void eirl_agent_on_obs_exit(void);
+
+/* Allows or forbids remote control on this OBS (saved with the link; off for a
+ * new link). Does nothing while not linked or in a Cloud OBS. */
+void eirl_agent_set_control_enabled(bool enabled);
 
 #ifdef __cplusplus
 }

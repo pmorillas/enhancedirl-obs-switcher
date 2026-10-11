@@ -18,12 +18,18 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* Shows the EnhancedIRL Switcher window (Tools menu). Call on the UI thread. */
 void eirl_ui_show_dialog(void);
+
+/* False in builds without a window (ENABLE_QT=OFF): nobody could see or change
+ * the remote control switch there, so it stays off. */
+bool eirl_ui_has_window(void);
 
 /* Tells the user that the stream moved from this OBS to `to_name` (a switch
  * asked for from My OBS at `at_ms`, milliseconds since the epoch). A newer

@@ -25,10 +25,15 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * show a notice when the stream moved to another OBS. There is no command to
  * change the server, the key or any other OBS setting, and the stream key never
  * leaves OBS: only an HMAC fingerprint of it.
+ *
+ * Remote control (remote-control.cpp) is separate and off unless the user turns
+ * it on in the plugin window: then a closed list of OBS actions can run, never
+ * one that reads or changes the key, the server, the settings or files.
  */
 
 #include "agent.hpp"
 #include "obs-bridge.hpp"
+#include "remote-control.hpp"
 #include "../managed.h"
 #include "../rtmp-output/eirl-rtmp.h"
 #include "../ui/switcher-dialog.hpp"
@@ -83,6 +88,10 @@ constexpr auto LOCAL_START_TIMEOUT = std::chrono::seconds(40);
 /* After a switch's cut, how long a restart (dead-man or rollback) still counts
  * as the same stream for streamingSince, on top of the dead-man delay. */
 constexpr auto SINCE_HOLD_MARGIN = LOCAL_START_TIMEOUT + std::chrono::seconds(20);
+/* The plugin window says "being controlled" for this long after a request ran. */
+constexpr long long CONTROL_ACTIVE_MS = 10000;
+/* Frames from the backend are small; anything bigger is not ours. */
+constexpr size_t MAX_INCOMING_BYTES = 64 * 1024;
 
 /* Close codes after which the plugin must not retry (docs/PROTOCOL.md §2). */
 constexpr int CLOSE_REVOKED = 4401;
@@ -305,8 +314,23 @@ struct Link {
 	std::string agentId;
 	std::string token;
 	std::string salt;
+	/* The user allowed remote control on this OBS (off for every new link). */
+	bool control = false;
 	bool valid() const { return !agentId.empty() && !token.empty(); }
 };
+
+/* Remote control when the plugin starts or a new link is made. */
+bool initial_control(bool saved)
+{
+#ifdef EIRL_TEST_HOOKS
+	/* Test builds only: automated tests turn it on without a window. */
+	const char *env = std::getenv("EIRL_SWITCHER_CONTROL");
+	if (env && std::strcmp(env, "1") == 0)
+		return true;
+#endif
+	/* Without a window nobody can see or change the switch: keep it off. */
+	return saved && eirl_ui_has_window();
+}
 
 std::string link_path()
 {
@@ -331,6 +355,7 @@ Link load_link()
 	l.agentId = obs_data_get_string(d, "agentId");
 	l.token = obs_data_get_string(d, "agentToken");
 	l.salt = obs_data_get_string(d, "fingerprintSalt");
+	l.control = obs_data_get_bool(d, "controlEnabled");
 	obs_data_release(d);
 	return l;
 }
@@ -344,6 +369,7 @@ void save_link(const Link &l)
 	}
 	Json d;
 	d.set("apiBase", l.apiBase).set("agentId", l.agentId).set("agentToken", l.token).set("fingerprintSalt", l.salt);
+	d.set_bool("controlEnabled", l.control);
 	std::string path = link_path();
 #ifdef _WIN32
 	obs_data_save_json_safe(d.d, path.c_str(), "tmp", "bak");
@@ -416,14 +442,37 @@ public:
 	void start()
 	{
 		ix::initNetSystem();
+		/* A Cloud OBS is never controlled through the plugin: it has its own way. */
+		control_supported_ = !EIRL_MANAGED_BUILD && eirl::RemoteControl::supported();
+		if (control_supported_) {
+			control_ = std::make_unique<eirl::RemoteControl>(
+				[this](const std::string &frame) { send(frame); });
+			control_->start();
+		}
 		running_ = true;
 		ticker_ = std::thread([this] { tick_loop(); });
 		Link l = EIRL_MANAGED_BUILD ? managed_link() : load_link();
+		if (!EIRL_MANAGED_BUILD)
+			l.control = initial_control(l.control);
+		if (EIRL_MANAGED_BUILD)
+			LOG(LOG_INFO, "remote control: not used in a Cloud OBS");
+		else if (!control_supported_)
+			LOG(LOG_INFO, "remote control: not available (this OBS has no OBS WebSocket 5.5 or later)");
+		else
+			LOG(LOG_INFO, "remote control: %s", l.valid() && l.control ? "on" : "off");
+		std::lock_guard<std::mutex> g(m_);
 		if (l.valid()) {
-			std::lock_guard<std::mutex> g(m_);
 			link_ = l;
+			apply_control_locked();
 			connect_locked();
 		}
+	}
+
+	/* OBS is closing: remote control stops while obs-websocket is still there. */
+	void on_obs_exit()
+	{
+		if (control_)
+			control_->shutdown();
 	}
 
 	void stop()
@@ -441,6 +490,8 @@ public:
 		}
 		if (ws)
 			ws->stop();
+		/* After the connection: nothing can queue a request any more. */
+		control_.reset();
 		ix::uninitNetSystem();
 	}
 
@@ -499,6 +550,7 @@ public:
 			std::lock_guard<std::mutex> g(m_);
 			ws = std::move(ws_);
 			link_ = Link{};
+			apply_control_locked();
 			account_.clear();
 			agent_name_.clear();
 			panel_url_.clear();
@@ -509,6 +561,25 @@ public:
 			ws->stop();
 		forget_link();
 		LOG(LOG_INFO, "unlinked from the EnhancedIRL account");
+	}
+
+	/* The switch in the plugin window (and the test hooks). Saved with the link. */
+	void set_control_enabled(bool enabled)
+	{
+		if (!control_supported_)
+			return;
+		{
+			/* Saved under the lock: an unlink or a revocation at the same moment
+			 * must not bring the forgotten link back to disk. */
+			std::lock_guard<std::mutex> g(m_);
+			if (!link_.valid() || link_.control == enabled)
+				return;
+			link_.control = enabled;
+			apply_control_locked();
+			save_link(link_);
+		}
+		LOG(LOG_INFO, "remote control turned %s", enabled ? "on" : "off");
+		force_status_ = true;
 	}
 
 	void state(eirl_agent_state *out)
@@ -528,6 +599,12 @@ public:
 		snprintf(out->agent_name, sizeof(out->agent_name), "%s", agent_name_.c_str());
 		snprintf(out->panel_url, sizeof(out->panel_url), "%s", panel_url_locked().c_str());
 		snprintf(out->error, sizeof(out->error), "%s", last_error_.c_str());
+		out->control_supported = control_supported_;
+		out->control_enabled = control_enabled_locked();
+		if (out->control_enabled && control_) {
+			const long long last = control_->last_request_ms();
+			out->control_active = last > 0 && steady_ms() - last < CONTROL_ACTIVE_MS;
+		}
 	}
 
 	void reopen_browser()
@@ -567,6 +644,8 @@ public:
 			return last_error_.empty() ? "Not linked" : "Not linked (" + last_error_ + ")";
 		std::string as = agent_name_.empty() ? "" : " as \"" + agent_name_ + "\"";
 		std::string state = connected_ ? " (connected)" : " (connecting...)";
+		if (control_enabled_locked())
+			state += ", remote control on";
 		if (!full)
 			return "Linked" + as + state;
 		std::string who = account_.empty() ? "your EnhancedIRL account" : account_;
@@ -615,6 +694,18 @@ public:
 private:
 	/* Caller holds m_. A cancelled link that is still winding down is not shown. */
 	bool pairing_visible_locked() const { return pairing_active_ && (!pairing_cancel_ || pairing_again_); }
+
+	/* Caller holds m_. */
+	bool control_enabled_locked() const { return control_supported_ && link_.valid() && link_.control; }
+
+	/* Caller holds m_. Tells remote control whether it may run requests. */
+	void apply_control_locked()
+	{
+		if (control_)
+			control_->set_enabled(control_enabled_locked());
+	}
+
+	static long long steady_ms() { return (long long)(os_gettime_ns() / 1000000); }
 
 	/* Caller holds m_. */
 	std::string panel_url_locked() const
@@ -675,9 +766,11 @@ private:
 	std::string status_json()
 	{
 		std::string salt;
+		bool control_enabled;
 		{
 			std::lock_guard<std::mutex> g(m_);
 			salt = link_.salt;
+			control_enabled = control_enabled_locked();
 		}
 		eirl::ObsState s = eirl::read_obs_state(salt);
 		long long since = 0;
@@ -721,6 +814,12 @@ private:
 			e.set("codec", s.encoder->codec).set("bitrateKbps", s.encoder->bitrateKbps);
 			st.set_obj("encoder", e);
 		}
+		/* Only with the "control" capability: the user's switch. */
+		if (control_supported_) {
+			Json c;
+			c.set_bool("enabled", control_enabled);
+			st.set_obj("control", c);
+		}
 		return st.dump();
 	}
 
@@ -734,7 +833,8 @@ private:
 			.set("os", os_name());
 		/* obs_data has no arrays of plain strings: append that field by hand. */
 		std::string json = h.dump();
-		json = json.substr(0, json.rfind('}')) + ",\"capabilities\":[\"cut\",\"start\"]}";
+		json = json.substr(0, json.rfind('}')) + ",\"capabilities\":[\"cut\",\"start\"" +
+		       (control_supported_ ? ",\"control\"" : "") + "]}";
 		send(json);
 	}
 
@@ -747,6 +847,9 @@ private:
 				connected_ = true;
 				last_error_.clear();
 			}
+			/* A new connection: the backend subscribes to events again. */
+			if (control_)
+				control_->reset_session();
 			LOG(LOG_INFO, "connected to EnhancedIRL");
 			send_hello();
 			force_status_ = true;
@@ -758,6 +861,8 @@ private:
 				std::lock_guard<std::mutex> g(m_);
 				connected_ = false;
 			}
+			if (control_)
+				control_->reset_session();
 			LOG(LOG_INFO, "disconnected from EnhancedIRL (%d)", code);
 			if (code == CLOSE_REVOKED || code == CLOSE_NOT_ALLOWED || code == CLOSE_REPLACED ||
 			    code == CLOSE_UPGRADE_REQUIRED)
@@ -786,6 +891,7 @@ private:
 			last_error_ = "revoked";
 			if (!EIRL_MANAGED_BUILD) {
 				link_ = Link{};
+				apply_control_locked();
 				account_.clear();
 				agent_name_.clear();
 				panel_url_.clear();
@@ -806,11 +912,27 @@ private:
 
 	void on_message(const std::string &text)
 	{
+		if (text.size() > MAX_INCOMING_BYTES)
+			return;
 		Json m = Json::parse(text);
 		if (!m.ok())
 			return;
 		const std::string type = m.str("type");
 		const std::string id = m.str("id");
+
+		/* Remote control: only what remote-control.cpp lets through runs. */
+		if (type == "obs_request") {
+			if (control_)
+				control_->on_request(m.d);
+			else if (!id.empty() && id.size() <= 64)
+				send(eirl::RemoteControl::refusal_frame(id));
+			return;
+		}
+		if (type == "obs_subscribe") {
+			if (control_)
+				control_->on_subscribe(text);
+			return;
+		}
 
 		if (type == "welcome") {
 			/* Also sent again later (e.g. when the OBS is renamed in My OBS). */
@@ -1052,6 +1174,7 @@ private:
 				l.agentId = c.str("agentId");
 				l.token = c.str("agentToken");
 				l.salt = c.str("fingerprintSalt");
+				l.control = initial_control(false);
 				if (!l.valid()) {
 					set_error("unexpected");
 					break;
@@ -1059,6 +1182,7 @@ private:
 				save_link(l);
 				std::lock_guard<std::mutex> g(m_);
 				link_ = l;
+				apply_control_locked();
 				pairing_code_.clear();
 				last_error_.clear();
 				connect_locked();
@@ -1111,6 +1235,10 @@ private:
 	long long since_ms_ = 0;
 	bool since_live_ = false;
 	Clock::time_point since_hold_until_;
+	/* Remote control: this OBS can run it (not a Cloud OBS, OBS WebSocket 5.5+).
+	 * Set once in start(). */
+	bool control_supported_ = false;
+	std::unique_ptr<eirl::RemoteControl> control_;
 	std::atomic<bool> force_status_{false};
 	std::atomic<bool> running_{false};
 	std::atomic<bool> pairing_active_{false};
@@ -1203,5 +1331,17 @@ void eirl_agent_on_streaming_stopped(void)
 {
 	if (g_agent)
 		g_agent->on_streaming_stopped();
+}
+
+void eirl_agent_on_obs_exit(void)
+{
+	if (g_agent)
+		g_agent->on_obs_exit();
+}
+
+void eirl_agent_set_control_enabled(bool enabled)
+{
+	if (g_agent)
+		g_agent->set_control_enabled(enabled);
 }
 }

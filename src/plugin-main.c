@@ -100,6 +100,8 @@ static void on_frontend_event(enum obs_frontend_event event, void *unused)
 	UNUSED_PARAMETER(unused);
 	if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED) {
 		eirl_agent_on_streaming_started();
+	} else if (event == OBS_FRONTEND_EVENT_EXIT) {
+		eirl_agent_on_obs_exit();
 	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPED) {
 		eirl_agent_on_streaming_stopped();
 #if EIRL_MANAGED_BUILD
@@ -155,6 +157,19 @@ static void vendor_ui(obs_data_t *request, obs_data_t *response, void *unused)
 	obs_data_set_bool(response, "ok", true);
 }
 
+/* Turns remote control on or off, as the switch in the window does:
+ * { "enabled": true|false }. */
+static void vendor_control(obs_data_t *request, obs_data_t *response, void *unused)
+{
+	UNUSED_PARAMETER(unused);
+	eirl_agent_set_control_enabled(obs_data_get_bool(request, "enabled"));
+	struct eirl_agent_state s;
+	eirl_agent_get_state(&s);
+	obs_data_set_bool(response, "ok", true);
+	obs_data_set_bool(response, "controlEnabled", s.control_enabled);
+	obs_data_set_bool(response, "controlSupported", s.control_supported);
+}
+
 static void vendor_status(obs_data_t *request, obs_data_t *response, void *unused)
 {
 	UNUSED_PARAMETER(request);
@@ -195,6 +210,7 @@ void obs_module_post_load(void)
 		obs_websocket_vendor_register_request(vendor, "unlink", vendor_unlink, NULL);
 		obs_websocket_vendor_register_request(vendor, "status", vendor_status, NULL);
 		obs_websocket_vendor_register_request(vendor, "ui", vendor_ui, NULL);
+		obs_websocket_vendor_register_request(vendor, "control", vendor_control, NULL);
 		obs_log(LOG_INFO, "test build: obs-websocket test hooks registered");
 	} else
 		obs_log(LOG_INFO, "obs-websocket not available: test cut only from the Tools menu");

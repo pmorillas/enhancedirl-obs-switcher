@@ -6,8 +6,9 @@ project(${_name} VERSION ${_version})
 
 option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
 option(ENABLE_QT "Use Qt functionality" ON)
-# Test hooks: the obs-websocket vendor "eirl-switcher" (cut, link, unlink, status, ui)
-# and plain-http API overrides, for automated test rigs. Never in release builds.
+# Test hooks: the obs-websocket vendor "eirl-switcher" (cut, link, unlink, status, ui,
+# control), plain-http API overrides and EIRL_SWITCHER_CONTROL=1 (remote control on
+# without the window), for automated test rigs. Never in release builds.
 option(ENABLE_TEST_HOOKS "Build the obs-websocket test hooks (test builds only)" OFF)
 
 include(compilerconfig)
@@ -53,6 +54,7 @@ target_sources(
     src/switcher-service.c
     src/agent/agent.cpp
     src/agent/obs-bridge.cpp
+    src/agent/remote-control.cpp
     src/rtmp-output/rtmp-stream.c
     src/rtmp-output/flv-mux.c
     src/rtmp-output/rtmp-av1.c
