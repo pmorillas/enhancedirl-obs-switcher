@@ -41,8 +41,8 @@ struct ObsState {
 	bool reconnecting = false;
 	/* The stream service is the switcher's and has a server and a key. */
 	bool serviceReady = false;
-	std::string platform;     /* "" if the service is not ours */
-	std::string serverHost;   /* host only, never the path */
+	std::string platform;       /* "" if the service is not ours */
+	std::string serverHost;     /* host only, never the path */
 	std::string keyFingerprint; /* hex HMAC-SHA256(salt, key), "" without key */
 	std::string twitchBroadcasterId;
 	std::optional<VideoInfo> video;

@@ -128,12 +128,21 @@ endif()
 target_compile_options(
   ${CMAKE_PROJECT_NAME}
   PRIVATE
-    $<$<COMPILE_LANG_AND_ID:C,AppleClang,Clang>:-Wno-comma -Wno-error -Wno-unused-parameter -Wno-sign-compare -Wno-shorten-64-to-32>
+    $<$<COMPILE_LANG_AND_ID:C,AppleClang,Clang>:-Wno-comma
+    -Wno-error
+    -Wno-unused-parameter
+    -Wno-sign-compare
+    -Wno-shorten-64-to-32>
     $<$<COMPILE_LANG_AND_ID:C,GNU>:-Wno-error>
-    $<$<COMPILE_LANG_AND_ID:C,MSVC>:/WX- /wd4100 /wd4996>
+    $<$<COMPILE_LANG_AND_ID:C,MSVC>:/WX-
+    /wd4100
+    /wd4996>
 )
 if(OS_WINDOWS)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::w32-pthreads iphlpapi winmm ws2_32 crypt32 bcrypt)
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}
+    PRIVATE OBS::w32-pthreads iphlpapi winmm ws2_32 crypt32 bcrypt
+  )
 endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

@@ -153,7 +153,6 @@ static void rtmp_stream_destroy(void *data)
 	bfree(stream);
 }
 
-
 static void rtmp_stream_eirl_cut(void *data, calldata_t *cd)
 {
 	struct rtmp_stream *stream = data;
