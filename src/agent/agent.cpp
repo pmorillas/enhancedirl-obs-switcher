@@ -57,6 +57,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <windows.h>
 #include <shellapi.h>
 #else
+#include <cerrno>
+#include <fcntl.h>
 #include <spawn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -90,11 +92,29 @@ constexpr int CLOSE_UPGRADE_REQUIRED = 4426;
 
 #define LOG(level, fmt, ...) blog(level, "[enhancedirl-obs-switcher] " fmt, ##__VA_ARGS__)
 
+/* Release builds only talk to the service over https: the agent token travels as
+ * a Bearer header, so it must never go over plain http. Test builds
+ * (ENABLE_TEST_HOOKS) also accept http, for a local development API. */
+bool acceptable_api_base(const std::string &base)
+{
+#ifdef EIRL_TEST_HOOKS
+	if (base.rfind("http://", 0) == 0)
+		return true;
+#endif
+	return base.rfind("https://", 0) == 0;
+}
+
 std::string api_base()
 {
 	/* Only for development builds and tests: production uses the default. */
 	const char *env = std::getenv("EIRL_SWITCHER_API");
 	std::string base = env && *env ? env : DEFAULT_API;
+	if (!acceptable_api_base(base)) {
+		static std::once_flag warned;
+		std::call_once(warned,
+			       [] { LOG(LOG_WARNING, "ignoring EIRL_SWITCHER_API: only https:// URLs are accepted"); });
+		base = DEFAULT_API;
+	}
 	while (!base.empty() && base.back() == '/')
 		base.pop_back();
 	return base;
@@ -303,6 +323,11 @@ Link load_link()
 	if (!d)
 		return l;
 	l.apiBase = obs_data_get_string(d, "apiBase");
+	if (!l.apiBase.empty() && !acceptable_api_base(l.apiBase)) {
+		/* A link saved by a test build against a plain-http API: use the default. */
+		LOG(LOG_WARNING, "ignoring the saved API address: only https:// URLs are accepted");
+		l.apiBase.clear();
+	}
 	l.agentId = obs_data_get_string(d, "agentId");
 	l.token = obs_data_get_string(d, "agentToken");
 	l.salt = obs_data_get_string(d, "fingerprintSalt");
@@ -320,11 +345,45 @@ void save_link(const Link &l)
 	Json d;
 	d.set("apiBase", l.apiBase).set("agentId", l.agentId).set("agentToken", l.token).set("fingerprintSalt", l.salt);
 	std::string path = link_path();
+#ifdef _WIN32
 	obs_data_save_json_safe(d.d, path.c_str(), "tmp", "bak");
-#ifndef _WIN32
-	chmod(path.c_str(), 0600); /* the token is a credential: user-only */
-	std::string bak = path + ".bak";
-	chmod(bak.c_str(), 0600);
+#else
+	/* The token is a credential: the file is user-only (0600) from the moment it
+	 * exists, never readable by others even briefly. Same scheme as
+	 * obs_data_save_json_safe: write a temporary file, keep the previous one as
+	 * .bak and rename the new one into place. */
+	const char *json = obs_data_get_json(d.d);
+	if (!json || !*json)
+		return;
+	const std::string tmp = path + ".tmp";
+	const std::string bak = path + ".bak";
+	int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+	if (fd < 0) {
+		LOG(LOG_WARNING, "could not save the link (open failed)");
+		return;
+	}
+	fchmod(fd, 0600); /* in case a stale temporary file existed with other permissions */
+	bool ok = true;
+	size_t len = std::strlen(json), off = 0;
+	while (ok && off < len) {
+		ssize_t n = write(fd, json + off, len - off);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			ok = false;
+		else
+			off += (size_t)n;
+	}
+	if (ok && fsync(fd) != 0)
+		ok = false;
+	if (close(fd) != 0)
+		ok = false;
+	if (!ok || os_safe_replace(path.c_str(), tmp.c_str(), bak.c_str()) != 0) {
+		LOG(LOG_WARNING, "could not save the link (write failed)");
+		os_unlink(tmp.c_str());
+		return;
+	}
+	chmod(bak.c_str(), 0600); /* a .bak written by an older version may be wider */
 #endif
 }
 
@@ -961,7 +1020,8 @@ private:
 			verify_url_ = verify_url;
 			last_error_.clear();
 		}
-		LOG(LOG_INFO, "linking: confirm code %s in your browser", code.c_str());
+		/* Never the code itself: people share OBS logs publicly. */
+		LOG(LOG_INFO, "linking: waiting for confirmation in the browser");
 		open_in_browser(verify_url);
 
 		Json poll;

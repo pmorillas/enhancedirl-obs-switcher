@@ -20,7 +20,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
 
-#include "obs-websocket-api.h"
 #include "switcher-service.h"
 #include "agent/agent.hpp"
 #include "ui/switcher-dialog.hpp"
@@ -28,15 +27,23 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <stdlib.h>
 
+/* Test hooks over obs-websocket (vendor "eirl-switcher") are only compiled into
+ * test builds (CMake option ENABLE_TEST_HOOKS, off by default). Release builds
+ * do not register the vendor at all. */
+#ifdef EIRL_TEST_HOOKS
+#include "obs-websocket-api.h"
+#endif
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
 extern struct obs_output_info eirl_rtmp_output_info;
 
+#ifdef EIRL_TEST_HOOKS
 static obs_websocket_vendor vendor;
 
-/* Corta la emisión principal sin despedirse de la plataforma. Sólo actúa si la
- * salida activa es la nuestra; con cualquier otra no hace nada. */
+/* Cuts the main stream without saying goodbye to the platform. It only acts if
+ * the active output is ours; with any other output it does nothing. */
 static bool switcher_cut(void)
 {
 	obs_output_t *out = obs_frontend_get_streaming_output();
@@ -52,6 +59,7 @@ static bool switcher_cut(void)
 	obs_output_release(out);
 	return ok;
 }
+#endif
 
 static void tools_open(void *unused)
 {
@@ -105,6 +113,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *unused)
 #endif
 }
 
+#ifdef EIRL_TEST_HOOKS
 static void vendor_cut(obs_data_t *request, obs_data_t *response, void *unused)
 {
 	UNUSED_PARAMETER(request);
@@ -154,6 +163,7 @@ static void vendor_status(obs_data_t *request, obs_data_t *response, void *unuse
 	obs_data_set_string(response, "status", text);
 	bfree(text);
 }
+#endif
 
 bool obs_module_load(void)
 {
@@ -177,6 +187,7 @@ bool obs_module_load(void)
 void obs_module_post_load(void)
 {
 	eirl_agent_start();
+#ifdef EIRL_TEST_HOOKS
 	vendor = obs_websocket_register_vendor("eirl-switcher");
 	if (vendor) {
 		obs_websocket_vendor_register_request(vendor, "cut", vendor_cut, NULL);
@@ -184,9 +195,10 @@ void obs_module_post_load(void)
 		obs_websocket_vendor_register_request(vendor, "unlink", vendor_unlink, NULL);
 		obs_websocket_vendor_register_request(vendor, "status", vendor_status, NULL);
 		obs_websocket_vendor_register_request(vendor, "ui", vendor_ui, NULL);
-	}
-	else
+		obs_log(LOG_INFO, "test build: obs-websocket test hooks registered");
+	} else
 		obs_log(LOG_INFO, "obs-websocket not available: test cut only from the Tools menu");
+#endif
 }
 
 void obs_module_unload(void)

@@ -6,6 +6,9 @@ project(${_name} VERSION ${_version})
 
 option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
 option(ENABLE_QT "Use Qt functionality" ON)
+# Test hooks: the obs-websocket vendor "eirl-switcher" (cut, link, unlink, status, ui)
+# and plain-http API overrides, for automated test rigs. Never in release builds.
+option(ENABLE_TEST_HOOKS "Build the obs-websocket test hooks (test builds only)" OFF)
 
 include(compilerconfig)
 include(defaults)
@@ -65,10 +68,10 @@ target_sources(
     src/shared/happy-eyeballs/happy-eyeballs.c
 )
 
-# Salida RTMP derivada de obs-outputs (OBS 31.1.1), con RTMPS por mbedTLS (el de las
-# dependencias de OBS en Windows/macOS, el del sistema en Linux: el mismo que usa OBS).
-# hashswf.c (verificación SWF, de la época de Flash) queda fuera: sin USE_HASHSWF nadie
-# la llama y así no hace falta zlib.
+# RTMP output derived from obs-outputs (OBS 31.1.1), with RTMPS through mbedTLS (the one
+# from OBS's dependencies on Windows/macOS, the system one on Linux: the same OBS uses).
+# hashswf.c (SWF verification, from the Flash era) is left out: without USE_HASHSWF
+# nothing calls it, so zlib is not needed.
 find_path(MBEDTLS_INCLUDE_DIR mbedtls/ssl.h REQUIRED)
 find_library(MBEDTLS_LIBRARY mbedtls REQUIRED)
 find_library(MBEDX509_LIBRARY mbedx509 REQUIRED)
@@ -85,6 +88,10 @@ target_include_directories(
   PRIVATE src src/rtmp-output src/shared/happy-eyeballs ${MBEDTLS_INCLUDE_DIR}
 )
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CRYPTO USE_MBEDTLS ENABLE_HEVC)
+if(ENABLE_TEST_HOOKS)
+  message(WARNING "ENABLE_TEST_HOOKS is ON: this build is for automated tests, do not distribute it")
+  target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE EIRL_TEST_HOOKS)
+endif()
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${MBEDTLS_LIBRARIES})
 if(OS_MACOS)
   target_link_libraries(
@@ -93,11 +100,11 @@ if(OS_MACOS)
   )
 endif()
 
-# WebSocket y HTTP del agente (vinculación y conexión con el backend): IXWebSocket
-# v11.4.6 (BSD-3), vendorizado en deps/ para compilar sin red (lo exige la imagen
-# del Cloud OBS). TLS: mbedTLS en Windows y macOS (el de OBS); OpenSSL en Linux,
-# porque esta versión de IXWebSocket necesita mbedTLS >= 3.6 y Ubuntu 24.04 (la base
-# del Cloud OBS) trae la 2.28. Sin zlib.
+# WebSocket and HTTP for the agent (linking and the connection to the service):
+# IXWebSocket v11.4.6 (BSD-3-Clause), vendored in deps/ so the plugin builds without
+# network access. TLS: mbedTLS on Windows and macOS (the one from OBS); OpenSSL on
+# Linux, because this IXWebSocket version needs mbedTLS >= 3.6 and Ubuntu 24.04
+# ships 2.28. No zlib.
 set(USE_TLS ON CACHE BOOL "" FORCE)
 if(OS_LINUX)
   set(USE_OPEN_SSL ON CACHE BOOL "" FORCE)
@@ -114,8 +121,8 @@ set_target_properties(ixwebsocket PROPERTIES POSITION_INDEPENDENT_CODE ON COMPIL
 target_compile_options(ixwebsocket PRIVATE $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-w> $<$<CXX_COMPILER_ID:MSVC>:/W0>)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ixwebsocket)
 if(OS_LINUX)
-  # Las librerías estáticas (IXWebSocket) no exportan nada: no pisan los símbolos
-  # que OBS ya tiene cargados.
+  # The static libraries (IXWebSocket) export nothing, so they cannot clash with
+  # symbols OBS has already loaded.
   target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -Wl,--exclude-libs,ALL)
 endif()
 target_compile_options(
