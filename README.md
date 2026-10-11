@@ -60,12 +60,48 @@ Step-by-step guide with screenshots and troubleshooting:
 
 To remove an OBS, use **Unlink** in the plugin window or in **My OBS**.
 
+## Remote control (optional)
+
+Remote control lets EnhancedIRL operate this OBS for you: the OBS controls in **My OBS**, a control
+link you share (for example with a moderator) and automatic scene switching all work through it.
+It is **off** until you turn it on, and you decide for each OBS.
+
+To turn it on, open **Tools → EnhancedIRL Switcher...** and tick **Allow remote control from
+EnhancedIRL**. The option appears once the OBS is linked. Untick it to turn it off; unlinking the
+OBS turns it off too.
+
+With it on, EnhancedIRL can, on that OBS:
+
+- see the scenes and switch the one on air, including Studio Mode's preview and transition;
+- start and stop the stream, and start, stop, pause and resume the recording, with your current
+  settings;
+- see your audio sources, change their volume and mute or unmute them;
+- show a preview image of a scene or source (at most 1280 pixels wide, never saved to disk);
+- read OBS's statistics and the state of the stream and the recording.
+
+It can **never** read or change your stream key, your server or stream service, any other OBS
+setting, your profiles or scene collections, create or edit sources, press hotkeys, or touch
+files on your computer. The plugin itself checks every request against this list, inside OBS,
+and refuses anything else without running it, whatever it is asked. The exact list is in
+[docs/PROTOCOL.md](docs/PROTOCOL.md#35-the-closed-list).
+
+While something is using it, the plugin window shows **Being controlled from EnhancedIRL**.
+
+It works from inside OBS, through the WebSocket plugin that comes with OBS: there is no WebSocket
+server, port or password to set up, and OBS's own WebSocket server can stay off. An EnhancedIRL
+Cloud OBS does not use this option.
+
 ## Privacy and security
 
-The plugin never sends your stream key, only a one-way fingerprint of it, and the service has no
-way to change where you stream to: it can only ask the plugin to start, stop or hand over the
-stream you already set up. Everything the plugin exchanges with EnhancedIRL is documented in
-[docs/PROTOCOL.md](docs/PROTOCOL.md).
+- **Switching never touches your stream key or where you stream to.** The plugin never sends your
+  stream key, only a one-way fingerprint of it, and the service has no way to change your server,
+  your key or any other setting: to move the stream, it can only ask the plugin to start, stop or
+  hand over the stream you already set up.
+- **Remote control only if you turn it on, and only the listed actions** — never your stream key,
+  server, settings or files. The list is enforced by the plugin, which is open source, so you
+  don't have to take our word for it.
+
+Everything the plugin exchanges with EnhancedIRL is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Building from source
 
@@ -107,4 +143,4 @@ It includes third-party code under its own licenses:
 | librtmp | `src/rtmp-output/librtmp/` | LGPL-2.1-or-later ([COPYING](src/rtmp-output/librtmp/COPYING)) |
 | IXWebSocket v11.4.6 | `deps/ixwebsocket/` | BSD-3-Clause ([LICENSE.txt](deps/ixwebsocket/LICENSE.txt)) |
 | happy-eyeballs (Twitch Interactive) | `src/shared/happy-eyeballs/` | MIT (file headers) |
-| obs-websocket API header (test builds only) | `src/obs-websocket-api.h` | GPL-2.0-or-later (file header) |
+| obs-websocket plugin API header | `src/obs-websocket-api.h` | GPL-2.0-or-later (file header) |
