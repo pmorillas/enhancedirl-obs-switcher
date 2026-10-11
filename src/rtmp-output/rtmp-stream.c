@@ -736,8 +736,8 @@ static void *send_thread(void *data)
 	set_output_error(stream);
 
 	if (os_atomic_load_bool(&stream->cut_no_goodbye)) {
-		/* Con los ids de stream a 0, RTMP_Close sólo cierra el socket: para la
-		 * plataforma es una caída y no un final (ver F0a en el plan). */
+		/* With the stream ids at 0, RTMP_Close only closes the socket: the
+		 * platform sees a dropped connection, not the end of the stream. */
 		for (int idx = 0; idx < stream->rtmp.Link.nStreams; idx++)
 			stream->rtmp.Link.streams[idx].id = 0;
 	}

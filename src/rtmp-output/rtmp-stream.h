@@ -55,7 +55,7 @@ struct dbr_frame {
 struct rtmp_stream {
 	obs_output_t *output;
 
-	/* EnhancedIRL: el corte del relevo cierra la conexión sin FCUnpublish/deleteStream */
+	/* EnhancedIRL: the switch cut closes the connection without FCUnpublish/deleteStream */
 	volatile bool cut_no_goodbye;
 
 	/* EnhancedIRL: takeover priority for Kick (Amazon IVS). Appended to the key

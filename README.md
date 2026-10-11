@@ -1,59 +1,110 @@
-# OBS Plugin Template
+# EnhancedIRL Switcher for OBS Studio
 
-## Introduction
+Hand your live stream from one OBS to another without ending it.
 
-The plugin template is meant to be used as a starting point for OBS Studio plugin development. It includes:
+EnhancedIRL Switcher is an OBS Studio plugin. Install it on each OBS you stream from, link them to
+your EnhancedIRL account, and move the stream between them from **My OBS** in the EnhancedIRL
+dashboard: the stream keeps going on your channel instead of ending and starting a new one.
 
-* Boilerplate plugin source code
-* A CMake project file
-* GitHub Actions workflows and repository actions
+It works between your home PC and an EnhancedIRL Cloud OBS, or from one PC to another.
 
-## Supported Build Environments
+**Supported platforms:** Twitch, Kick and YouTube.
 
-| Platform  | Tool   |
-|-----------|--------|
-| Windows   | Visual Studio 17 2022 |
-| macOS     | XCode 16.0 |
-| Windows, macOS  | CMake 3.30.5 |
-| Ubuntu 24.04 | CMake 3.28.3 |
-| Ubuntu 24.04 | `ninja-build` |
-| Ubuntu 24.04 | `pkg-config`
-| Ubuntu 24.04 | `build-essential` |
+Full guide: <https://docs.enhancedirl.com/go/en/my-obs>
 
-## Quick Start
+## Requirements
 
-An absolute bare-bones [Quick Start Guide](https://github.com/obsproject/obs-plugintemplate/wiki/Quick-Start-Guide) is available in the wiki.
+- OBS Studio 31 or later.
+- Windows 10/11 64-bit, macOS 12 or later (Apple Silicon and Intel), or Linux x86_64 (tested on
+  Ubuntu 24.04; OBS installed with Flatpak is not supported).
+- A free EnhancedIRL account with a verified email.
 
-## Documentation
+## Install
 
-All documentation can be found in the [Plugin Template Wiki](https://github.com/obsproject/obs-plugintemplate/wiki).
+Download the plugin from <https://enhancedirl.com/obs-plugin> and close OBS before installing.
 
-Suggested reading to get up and running:
+| System | File |
+|---|---|
+| Windows | `enhancedirl-obs-switcher-windows-x64.zip` |
+| macOS | `enhancedirl-obs-switcher-macos-universal.tar.xz` |
+| Linux | `enhancedirl-obs-switcher-x86_64-linux-gnu.tar.xz` |
 
-* [Getting started](https://github.com/obsproject/obs-plugintemplate/wiki/Getting-Started)
-* [Build system requirements](https://github.com/obsproject/obs-plugintemplate/wiki/Build-System-Requirements)
-* [Build system options](https://github.com/obsproject/obs-plugintemplate/wiki/CMake-Build-System-Options)
+**Windows.** Unzip the `.zip` into `C:\ProgramData\obs-studio\plugins\`. You should end up with an
+`enhancedirl-obs-switcher` folder inside `plugins`.
 
-## GitHub Actions & CI
+**macOS.** Double-click the `.tar.xz` to open it and move `enhancedirl-obs-switcher.plugin` to
+`~/Library/Application Support/obs-studio/plugins/`. The plugin is not signed yet, so run this once
+in Terminal:
 
-Default GitHub Actions workflows are available for the following repository actions:
+```sh
+xattr -dr com.apple.quarantine ~/Library/Application\ Support/obs-studio/plugins/enhancedirl-obs-switcher.plugin
+```
 
-* `push`: Run for commits or tags pushed to `master` or `main` branches.
-* `pr-pull`: Run when a Pull Request has been pushed or synchronized.
-* `dispatch`: Run when triggered by the workflow dispatch in GitHub's user interface.
-* `build-project`: Builds the actual project and is triggered by other workflows.
-* `check-format`: Checks CMake and plugin source code formatting and is triggered by other workflows.
+**Linux.** From the folder you downloaded it to:
 
-The workflows make use of GitHub repository actions (contained in `.github/actions`) and build scripts (contained in `.github/scripts`) which are not needed for local development, but might need to be adjusted if additional/different steps are required to build the plugin.
+```sh
+sudo tar -xJf enhancedirl-obs-switcher-x86_64-linux-gnu.tar.xz -C /usr
+```
 
-### Retrieving build artifacts
+Step-by-step guide with screenshots and troubleshooting:
+<https://docs.enhancedirl.com/go/en/obs-plugin>
 
-Successful builds on GitHub Actions will produce build artifacts that can be downloaded for testing. These artifacts are commonly simple archives and will not contain package installers or installation programs.
+## First use
 
-### Building a Release
+1. Open OBS and go to **Tools → EnhancedIRL Switcher...**.
+2. Click **Link this OBS**. OBS shows a code and opens the EnhancedIRL dashboard in your browser.
+3. Check that the dashboard shows the same code and confirm. The code expires after 10 minutes.
+4. Back in OBS, with the stream stopped, click **Use EnhancedIRL Switcher**. This switches your
+   stream service to EnhancedIRL Switcher and keeps your platform, server and stream key.
+5. Repeat on your other OBS. From then on, **My OBS** lets you move the stream between them.
 
-To create a release, an appropriately named tag needs to be pushed to the `main`/`master` branch using semantic versioning (e.g., `12.3.4`, `23.4.5-beta2`). A draft release will be created on the associated repository with generated installer packages or installation programs attached as release artifacts.
+To remove an OBS, use **Unlink** in the plugin window or in **My OBS**.
 
-## Signing and Notarizing on macOS
+## Privacy and security
 
-Basic concepts of codesigning and notarization on macOS are explained in the correspodning [Wiki article](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS) which has a specific section for the [GitHub Actions setup](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS#setting-up-code-signing-for-github-actions).
+The plugin never sends your stream key, only a one-way fingerprint of it, and the service has no
+way to change where you stream to: it can only ask the plugin to start, stop or hand over the
+stream you already set up. Everything the plugin exchanges with EnhancedIRL is documented in
+[docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+## Building from source
+
+You need CMake 3.28 or later and the toolchain for your system (Xcode on macOS, Visual Studio 2022
+on Windows, GCC/Ninja on Linux). On macOS and Windows the build downloads the OBS sources and
+dependencies pinned in `buildspec.json`; on Linux it uses the system OBS development packages,
+Qt 6, mbedTLS and OpenSSL.
+
+```sh
+# macOS
+cmake --preset macos
+cmake --build --preset macos
+
+# Windows
+cmake --preset windows-x64
+cmake --build --preset windows-x64
+
+# Linux
+cmake --preset ubuntu-x86_64
+cmake --build --preset ubuntu-x86_64
+```
+
+`-DENABLE_TEST_HOOKS=ON` builds extra hooks for automated tests. Never distribute such a build.
+
+## Support
+
+Write to <support@enhancedirl.com> or open a ticket from **Support** in the EnhancedIRL dashboard.
+
+## License
+
+EnhancedIRL Switcher is free software, licensed under the GNU General Public License, version 2 or
+(at your option) any later version. See [LICENSE](LICENSE).
+
+It includes third-party code under its own licenses:
+
+| Component | Where | License |
+|---|---|---|
+| RTMP output, derived from OBS Studio's `obs-outputs` | `src/rtmp-output/` | GPL-2.0-or-later (file headers) |
+| librtmp | `src/rtmp-output/librtmp/` | LGPL-2.1-or-later ([COPYING](src/rtmp-output/librtmp/COPYING)) |
+| IXWebSocket v11.4.6 | `deps/ixwebsocket/` | BSD-3-Clause ([LICENSE.txt](deps/ixwebsocket/LICENSE.txt)) |
+| happy-eyeballs (Twitch Interactive) | `src/shared/happy-eyeballs/` | MIT (file headers) |
+| obs-websocket API header (test builds only) | `src/obs-websocket-api.h` | GPL-2.0-or-later (file header) |
