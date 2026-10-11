@@ -26,7 +26,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 void eirl_ui_show_dialog(void)
 {
+	/* Only test builds put the pairing code and the account in the log. */
+#ifdef EIRL_TEST_HOOKS
 	char *text = eirl_agent_describe();
+#else
+	char *text = eirl_agent_describe_for_log();
+#endif
 	obs_log(LOG_INFO, "status: %s", text);
 	bfree(text);
 }

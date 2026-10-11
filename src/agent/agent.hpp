@@ -40,9 +40,15 @@ void eirl_agent_cancel_pairing(void);
 /* Forgets the saved link and disconnects. */
 void eirl_agent_unlink(void);
 
-/* Human-readable state for logs and tests ("Linked to x (connected)"...).
+#ifdef EIRL_TEST_HOOKS
+/* Human-readable state for tests, with the pairing code and the account
+ * ("Linked to x (connected)"...). Test builds only: never log it.
  * Returns a newly allocated string: free it with bfree(). */
 char *eirl_agent_describe(void);
+#endif
+/* Human-readable state safe for the OBS log: no pairing code, no account.
+ * Returns a newly allocated string: free it with bfree(). */
+char *eirl_agent_describe_for_log(void);
 
 /* Structured state for the UI (which translates it). */
 struct eirl_agent_state {

@@ -551,17 +551,26 @@ public:
 		open_in_browser(url);
 	}
 
-	std::string describe()
+	/* `full` adds the pairing code and the account, for test builds only: the
+	 * plain version is the one that may end up in the OBS log, which people
+	 * share publicly. */
+	std::string describe(bool full)
 	{
 		std::lock_guard<std::mutex> g(m_);
-		if (pairing_visible_locked())
+		if (pairing_visible_locked()) {
+			if (!full)
+				return "Linking: waiting for confirmation in the browser";
 			return pairing_code_.empty() ? "Linking..."
 						     : "Linking: confirm code " + pairing_code_ + " in your browser";
+		}
 		if (!link_.valid())
 			return last_error_.empty() ? "Not linked" : "Not linked (" + last_error_ + ")";
+		std::string as = agent_name_.empty() ? "" : " as \"" + agent_name_ + "\"";
+		std::string state = connected_ ? " (connected)" : " (connecting...)";
+		if (!full)
+			return "Linked" + as + state;
 		std::string who = account_.empty() ? "your EnhancedIRL account" : account_;
-		std::string as = agent_name_.empty() ? "" : " as " + agent_name_;
-		return "Linked to " + who + as + (connected_ ? " (connected)" : " (connecting...)");
+		return "Linked to " + who + (agent_name_.empty() ? "" : " as " + agent_name_) + state;
 	}
 
 	void on_streaming_started()
@@ -813,7 +822,8 @@ private:
 				panel_url_ = panel;
 			else if (!panel.empty())
 				LOG(LOG_WARNING, "ignoring an unexpected panel URL");
-			LOG(LOG_INFO, "linked to %s as \"%s\"", account_.c_str(), agent_name_.c_str());
+			/* Not the account: people share OBS logs publicly. */
+			LOG(LOG_INFO, "linked as \"%s\"", agent_name_.c_str());
 			return;
 		}
 		if (type == "handedOff") {
@@ -1171,9 +1181,16 @@ void eirl_agent_open_panel(void)
 		g_agent->open_panel();
 }
 
+#ifdef EIRL_TEST_HOOKS
 char *eirl_agent_describe(void)
 {
-	return bstrdup(g_agent ? g_agent->describe().c_str() : "Not running");
+	return bstrdup(g_agent ? g_agent->describe(true).c_str() : "Not running");
+}
+#endif
+
+char *eirl_agent_describe_for_log(void)
+{
+	return bstrdup(g_agent ? g_agent->describe(false).c_str() : "Not running");
 }
 
 void eirl_agent_on_streaming_started(void)
